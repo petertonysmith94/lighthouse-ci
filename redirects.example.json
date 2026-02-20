@@ -1,0 +1,7 @@
+[
+  { "from": "https://plasma.to/", "to": "https://plasma.org/" },
+  { "from": "https://plasma.to/insights", "to": "https://plasma.org/blog" },
+  { "from": "https://plasma.to/about", "to": "https://plasma.org/network" },
+  { "from": "https://plasma.to/ecosystem", "to": "https://plasma.org/ecosystem" },
+  { "from": "https://plasma.to/careers", "to": "https://plasma.org/careers" }
+]
