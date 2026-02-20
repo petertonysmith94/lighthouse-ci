@@ -160,6 +160,13 @@ jobs:
           uploadArtifacts: false
           temporaryPublicStorage: false
 
+      - name: Save mobile results
+        if: ${{ !cancelled() }}
+        run: |
+          mkdir -p .lighthouseci/mobile
+          cp .lighthouseci/*.json .lighthouseci/*.html .lighthouseci/mobile/ 2>/dev/null || true
+          rm -f .lighthouseci/*.json .lighthouseci/*.html
+
       - name: Run Lighthouse CI (desktop)
         id: lhci-desktop
         continue-on-error: true
@@ -173,6 +180,13 @@ jobs:
             ${{ steps.vercel.outputs.preview_url }}
           uploadArtifacts: false
           temporaryPublicStorage: false
+
+      - name: Save desktop results
+        if: ${{ !cancelled() }}
+        run: |
+          mkdir -p .lighthouseci/desktop
+          cp .lighthouseci/*.json .lighthouseci/*.html .lighthouseci/desktop/ 2>/dev/null || true
+          rm -f .lighthouseci/*.json .lighthouseci/*.html
 
       - name: Upload Lighthouse reports (mobile)
         if: ${{ !cancelled() }}
@@ -207,7 +221,10 @@ jobs:
             if (!manifest.length) return null;
 
             const rep = manifest.find(m => m.isRepresentativeRun) || manifest[0];
-            const report = JSON.parse(fs.readFileSync(rep.jsonPath, "utf8"));
+            // manifest.json has absolute paths to the original .lighthouseci/ root;
+            // resolve the basename into the preset subdirectory instead
+            const jsonFile = path.join(dir, path.basename(rep.jsonPath));
+            const report = JSON.parse(fs.readFileSync(jsonFile, "utf8"));
 
             return {
               url: rep.url,
