@@ -101,7 +101,7 @@ jobs:
           const base = "https://api.vercel.com/v6/deployments";
           // Filter by meta-githubCommitSha (Vercel Git integration)
           const url = new URL(base);
-          url.searchParams.set("app", projectId);
+          url.searchParams.set("projectId", projectId);
           if (teamId) url.searchParams.set("teamId", teamId);
           url.searchParams.set("meta-githubCommitSha", sha);
 
