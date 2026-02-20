@@ -34,6 +34,10 @@ module.exports = {
         ...(isDesktop ? { preset: "desktop" } : {}),
         formFactor: isDesktop ? "desktop" : "mobile",
 
+        // Vercel preview deployments always set X-Robots-Tag: noindex,
+        // so skip this audit to avoid penalising the SEO category score.
+        skipAudits: ["is-crawlable"],
+
         // More stable CI runs
         throttlingMethod: "devtools",
         chromeFlags: ["--no-sandbox", "--disable-dev-shm-usage"],
