@@ -1,4 +1,4 @@
-name: Lighthouse CI (Vercel Preview)
+name: Lighthouse
 
 on:
   pull_request:
