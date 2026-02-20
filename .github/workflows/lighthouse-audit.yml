@@ -99,8 +99,7 @@ jobs:
           }
 
           const base = "https://api.vercel.com/v6/deployments";
-          // Filtering by meta-githubCommitSha is commonly used with Git integration.
-          // (It's documented in Vercel CLI docs; REST filtering by meta is used in practice.)
+          // Filter by meta-githubCommitSha (Vercel Git integration)
           const url = new URL(base);
           url.searchParams.set("app", projectId);
           if (teamId) url.searchParams.set("teamId", teamId);
