@@ -11,13 +11,13 @@ jobs:
     runs-on: ubuntu-latest
 
     # Only run on:
-    # - ready_for_review event (first time it’s set in-review)
-    # - synchronize events AFTER we’ve marked the PR as enabled (label)
+    # - ready_for_review event (first time it's set in-review)
+    # - synchronize events AFTER we've marked the PR as enabled (label)
     # - issue_comment with "@lighthouse" on a PR
     if: |
-      (github.event.action == ‘ready_for_review’) ||
-      (github.event.action == ‘synchronize’ && contains(github.event.pull_request.labels.*.name, ‘lhci-enabled’) && github.event.pull_request.draft == false) ||
-      (github.event_name == ‘issue_comment’ && github.event.issue.pull_request && contains(github.event.comment.body, ‘@lighthouse’))
+      (github.event.action == 'ready_for_review') ||
+      (github.event.action == 'synchronize' && contains(github.event.pull_request.labels.*.name, 'lhci-enabled') && github.event.pull_request.draft == false) ||
+      (github.event_name == 'issue_comment' && github.event.issue.pull_request && contains(github.event.comment.body, '@lighthouse'))
 
     permissions:
       contents: read
@@ -83,7 +83,7 @@ jobs:
         id: vercel
         env:
           VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
-          VERCEL_TEAM_ID: ${{ secrets.VERCEL_TEAM_ID }} # optional if you’re not in a team
+          VERCEL_TEAM_ID: ${{ secrets.VERCEL_TEAM_ID }} # optional if you're not in a team
           VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}
           COMMIT_SHA: ${{ steps.pr.outputs.sha }}
         run: |
@@ -100,7 +100,7 @@ jobs:
 
           const base = "https://api.vercel.com/v6/deployments";
           // Filtering by meta-githubCommitSha is commonly used with Git integration.
-          // (It’s documented in Vercel CLI docs; REST filtering by meta is used in practice.)
+          // (It's documented in Vercel CLI docs; REST filtering by meta is used in practice.)
           const url = new URL(base);
           url.searchParams.set("app", projectId);
           if (teamId) url.searchParams.set("teamId", teamId);
@@ -127,7 +127,7 @@ jobs:
               const state = d.state;
               const previewUrl = d.url ? `https://${d.url}` : null;
 
-              // State values vary; READY is the key stable target. If URL is still null, it’s not done.
+              // State values vary; READY is the key stable target. If URL is still null, it's not done.
               if ((state === "READY" || state === "ready") && previewUrl) {
                 console.log("Preview ready:", previewUrl);
                 const out = process.env.GITHUB_OUTPUT;
