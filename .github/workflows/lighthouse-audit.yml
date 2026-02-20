@@ -180,6 +180,7 @@ jobs:
         with:
           name: lhci-report
           path: .lighthouseci/**
+          include-hidden-files: true
 
       - name: Build PR comment
         id: summary
