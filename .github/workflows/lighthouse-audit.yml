@@ -126,7 +126,7 @@ jobs:
               const state = d.state;
               const previewUrl = d.url ? `https://${d.url}` : null;
 
-              // State values vary; READY is the key stable target. If URL is still null, it's not done.
+              // READY is the stable target state; URL must also be present.
               if ((state === "READY" || state === "ready") && previewUrl) {
                 console.log("Preview ready:", previewUrl);
                 const out = process.env.GITHUB_OUTPUT;
