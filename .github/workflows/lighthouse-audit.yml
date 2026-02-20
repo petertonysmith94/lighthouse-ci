@@ -1,0 +1,468 @@
+name: Lighthouse
+
+on:
+  pull_request:
+    types: [ready_for_review, synchronize]
+  issue_comment:
+    types: [created]
+
+jobs:
+  lhci:
+    runs-on: ubuntu-latest
+
+    # Only run on:
+    # - ready_for_review event (first time it's set in-review)
+    # - synchronize events AFTER we've marked the PR as enabled (label)
+    # - issue_comment with "@lighthouse" on a PR
+    if: |
+      (github.event.action == 'ready_for_review') ||
+      (github.event.action == 'synchronize' && contains(github.event.pull_request.labels.*.name, 'lhci-enabled') && github.event.pull_request.draft == false) ||
+      (github.event_name == 'issue_comment' && github.event.issue.pull_request && contains(github.event.comment.body, '@lighthouse'))
+
+    permissions:
+      contents: read
+      pull-requests: write
+
+    steps:
+      # Resolve PR metadata when triggered via comment (issue_comment has no pull_request context)
+      - name: Resolve PR details from comment
+        id: pr
+        uses: actions/github-script@v7
+        with:
+          script: |
+            if (context.eventName === 'issue_comment') {
+              const { data: pr } = await github.rest.pulls.get({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                pull_number: context.issue.number,
+              });
+              core.setOutput('number', pr.number);
+              core.setOutput('sha', pr.head.sha);
+            } else {
+              core.setOutput('number', context.payload.pull_request.number);
+              core.setOutput('sha', context.payload.pull_request.head.sha);
+            }
+
+      - uses: actions/checkout@v5
+
+      - name: Enable LHCI for this PR (label once)
+        if: ${{ github.event.action == 'ready_for_review' }}
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const owner = context.repo.owner;
+            const repo = context.repo.repo;
+            const issue_number = ${{ steps.pr.outputs.number }};
+            const label = 'lhci-enabled';
+
+            // Ensure label exists (create if missing)
+            try {
+              await github.rest.issues.getLabel({ owner, repo, name: label });
+            } catch (e) {
+              await github.rest.issues.createLabel({
+                owner, repo, name: label,
+                color: '0E8A16',
+                description: 'Run Lighthouse CI on PR updates after ready-for-review'
+              });
+            }
+
+            // Add label to PR
+            await github.rest.issues.addLabels({
+              owner, repo, issue_number,
+              labels: [label],
+            });
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: "latest"
+
+      # Wait for the *latest* Vercel preview deployment for this commit SHA to be READY,
+      # then output the preview URL.
+      - name: Wait for Vercel preview deployment to be ready
+        id: vercel
+        env:
+          VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
+          VERCEL_TEAM_ID: ${{ secrets.VERCEL_TEAM_ID }} # optional if you're not in a team
+          VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}
+          COMMIT_SHA: ${{ steps.pr.outputs.sha }}
+        run: |
+          bun -e '
+          const token = process.env.VERCEL_TOKEN;
+          const teamId = process.env.VERCEL_TEAM_ID;
+          const projectId = process.env.VERCEL_PROJECT_ID;
+          const sha = process.env.COMMIT_SHA;
+
+          if (!token || !projectId || !sha) {
+            console.error("Missing VERCEL_TOKEN / VERCEL_PROJECT_ID / COMMIT_SHA");
+            process.exit(1);
+          }
+
+          const base = "https://api.vercel.com/v6/deployments";
+          // Filter by meta-githubCommitSha (Vercel Git integration)
+          const url = new URL(base);
+          url.searchParams.set("projectId", projectId);
+          if (teamId) url.searchParams.set("teamId", teamId);
+          url.searchParams.set("meta-githubCommitSha", sha);
+
+          const headers = { Authorization: `Bearer ${token}` };
+
+          const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+
+          const maxMs = 10 * 60 * 1000; // 10 min
+          const start = Date.now();
+
+          while (Date.now() - start < maxMs) {
+            const res = await fetch(url, { headers });
+            if (!res.ok) {
+              console.error("Vercel API error", res.status, await res.text());
+              process.exit(1);
+            }
+            const data = await res.json();
+            const deployments = data.deployments || [];
+            const d = deployments[0]; // newest
+
+            if (d) {
+              const state = d.state;
+              const previewUrl = d.url ? `https://${d.url}` : null;
+
+              // READY is the stable target state; URL must also be present.
+              if ((state === "READY" || state === "ready") && previewUrl) {
+                console.log("Preview ready:", previewUrl);
+                const out = process.env.GITHUB_OUTPUT;
+                await Bun.write(out, `preview_url=${previewUrl}\n`, { append: true });
+                process.exit(0);
+              } else {
+                console.log("Not ready yet:", { state, url: d.url ?? null });
+              }
+            } else {
+              console.log("No deployment found yet for sha", sha);
+            }
+
+            await sleep(5000);
+          }
+
+          console.error("Timed out waiting for Vercel preview deployment");
+          process.exit(1);
+          '
+
+      - name: Run Lighthouse CI (mobile)
+        id: lhci-mobile
+        continue-on-error: true
+        uses: treosh/lighthouse-ci-action@v12
+        env:
+          VERCEL_AUTOMATION_BYPASS_SECRET: ${{ secrets.VERCEL_AUTOMATION_BYPASS_SECRET }}
+          LH_PRESET: mobile
+        with:
+          configPath: ./lighthouserc.js
+          urls: |
+            ${{ steps.vercel.outputs.preview_url }}
+          uploadArtifacts: false
+          temporaryPublicStorage: false
+
+      - name: Save mobile results
+        if: ${{ !cancelled() }}
+        run: |
+          mkdir -p .lighthouseci/mobile
+          cp .lighthouseci/*.json .lighthouseci/*.html .lighthouseci/mobile/ 2>/dev/null || true
+          rm -f .lighthouseci/*.json .lighthouseci/*.html
+
+      - name: Run Lighthouse CI (desktop)
+        id: lhci-desktop
+        continue-on-error: true
+        uses: treosh/lighthouse-ci-action@v12
+        env:
+          VERCEL_AUTOMATION_BYPASS_SECRET: ${{ secrets.VERCEL_AUTOMATION_BYPASS_SECRET }}
+          LH_PRESET: desktop
+        with:
+          configPath: ./lighthouserc.js
+          urls: |
+            ${{ steps.vercel.outputs.preview_url }}
+          uploadArtifacts: false
+          temporaryPublicStorage: false
+
+      - name: Save desktop results
+        if: ${{ !cancelled() }}
+        run: |
+          mkdir -p .lighthouseci/desktop
+          cp .lighthouseci/*.json .lighthouseci/*.html .lighthouseci/desktop/ 2>/dev/null || true
+          rm -f .lighthouseci/*.json .lighthouseci/*.html
+
+      - name: Upload Lighthouse reports (mobile)
+        id: upload-mobile
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: mobile-lhci-report
+          path: .lighthouseci/mobile/**
+          include-hidden-files: true
+
+      - name: Upload Lighthouse reports (desktop)
+        id: upload-desktop
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: desktop-lhci-report
+          path: .lighthouseci/desktop/**
+          include-hidden-files: true
+
+      - name: Build PR comment
+        id: summary
+        if: ${{ !cancelled() }}
+        env:
+          MOBILE_ARTIFACT_URL: ${{ steps.upload-mobile.outputs.artifact-url }}
+          DESKTOP_ARTIFACT_URL: ${{ steps.upload-desktop.outputs.artifact-url }}
+        run: |
+          bun -e '
+          const fs = require("fs");
+          const path = require("path");
+
+          function getResults(preset) {
+            const dir = path.join(".lighthouseci", preset);
+            const manifestPath = path.join(dir, "manifest.json");
+            if (!fs.existsSync(manifestPath)) return null;
+
+            const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
+            if (!manifest.length) return null;
+
+            const rep = manifest.find(m => m.isRepresentativeRun) || manifest[0];
+            // manifest.json has absolute paths to the original .lighthouseci/ root;
+            // resolve the basename into the preset subdirectory instead
+            const jsonFile = path.join(dir, path.basename(rep.jsonPath));
+            const report = JSON.parse(fs.readFileSync(jsonFile, "utf8"));
+
+            return {
+              url: rep.url,
+              categories: {
+                performance: report.categories?.performance?.score,
+                seo: report.categories?.seo?.score,
+                accessibility: report.categories?.accessibility?.score,
+                "best-practices": report.categories?.["best-practices"]?.score,
+              },
+              audits: {
+                "largest-contentful-paint": report.audits?.["largest-contentful-paint"]?.numericValue,
+                "cumulative-layout-shift": report.audits?.["cumulative-layout-shift"]?.numericValue,
+                "server-response-time": report.audits?.["server-response-time"]?.numericValue,
+                "total-blocking-time": report.audits?.["total-blocking-time"]?.numericValue,
+                interactive: report.audits?.interactive?.numericValue,
+                "speed-index": report.audits?.["speed-index"]?.numericValue,
+              },
+              rawCategories: report.categories,
+              rawAudits: report.audits,
+            };
+          }
+
+          try {
+            const mobile = getResults("mobile");
+            const desktop = getResults("desktop");
+            const previewUrl = mobile?.url || desktop?.url || "";
+            const repo = process.env.GITHUB_REPOSITORY || "";
+            const runId = process.env.GITHUB_RUN_ID || "";
+
+            function fmtMs(val) {
+              if (val == null) return "---";
+              if (val >= 1000) return (val / 1000).toFixed(1) + "s";
+              return Math.round(val) + "ms";
+            }
+
+            function fmtScore(score) {
+              if (score == null) return "---";
+              return String(Math.round(score * 100));
+            }
+
+            const cats = [
+              { key: "performance", label: "Performance", mT: 90, dT: 95 },
+              { key: "seo", label: "SEO", mT: 95, dT: 95 },
+              { key: "accessibility", label: "Accessibility", mT: 90, dT: 90 },
+              { key: "best-practices", label: "Best Practices", mT: 90, dT: 90 },
+            ];
+
+            const vitals = [
+              { key: "largest-contentful-paint", label: "LCP", budget: 1000, unit: "ms" },
+              { key: "cumulative-layout-shift", label: "CLS", budget: 0.1, unit: "" },
+              { key: "server-response-time", label: "TTFB", budget: 300, unit: "ms" },
+              { key: "total-blocking-time", label: "TBT", budget: 200, unit: "ms" },
+              { key: "interactive", label: "TTI", budget: 8000, unit: "ms" },
+              { key: "speed-index", label: "Speed Index", budget: 8000, unit: "ms" },
+            ];
+
+            let md = "<!-- lhci-report -->\n";
+            md += "## Lighthouse Report\n\n";
+
+            if (!mobile && !desktop) {
+              md += "No Lighthouse results available. Check the workflow logs for errors.\n";
+            } else {
+              // Compute overall pass/fail per preset
+              function isPresetPassing(results, preset) {
+                if (!results) return null;
+                for (const c of cats) {
+                  const s = results.categories[c.key];
+                  const threshold = preset === "mobile" ? c.mT : c.dT;
+                  if (s != null && Math.round(s * 100) < threshold) return false;
+                }
+                for (const v of vitals) {
+                  const val = results.audits[v.key];
+                  if (val != null && val > v.budget) return false;
+                }
+                return true;
+              }
+
+              const desktopPass = isPresetPassing(desktop, "desktop");
+              const mobilePass = isPresetPassing(mobile, "mobile");
+
+              const desktopIcon = desktopPass === null ? "\u26AA" : desktopPass ? "\u{1F7E2}" : "\u{1F534}";
+              const mobileIcon = mobilePass === null ? "\u26AA" : mobilePass ? "\u{1F7E2}" : "\u{1F534}";
+
+              md += desktopIcon + " **Desktop** &nbsp;&nbsp; " + mobileIcon + " **Mobile**\n\n";
+              md += "**Preview:** " + previewUrl + "\n\n";
+
+              // --- Issues Breakdown ---
+              function buildBreakdown(results, preset) {
+                if (!results) return "";
+                const icon = preset === "mobile" ? "📱" : "🖥️";
+                const label = preset === "mobile" ? "Mobile" : "Desktop";
+                let out = "";
+
+                for (const c of cats) {
+                  const category = results.rawCategories?.[c.key];
+                  if (!category) continue;
+
+                  const threshold = preset === "mobile" ? c.mT : c.dT;
+                  const catScore = category.score != null ? Math.round(category.score * 100) : null;
+
+                  // Collect failing audits within this category
+                  const failingAudits = [];
+                  for (const ref of category.auditRefs || []) {
+                    const audit = results.rawAudits?.[ref.id];
+                    if (!audit) continue;
+                    if (audit.scoreDisplayMode === "notApplicable" ||
+                        audit.scoreDisplayMode === "manual" ||
+                        audit.scoreDisplayMode === "informative") continue;
+                    if (audit.score === null || audit.score >= 0.9) continue;
+                    failingAudits.push({
+                      title: audit.title,
+                      displayValue: audit.displayValue || "",
+                    });
+                  }
+
+                  if (failingAudits.length === 0) continue;
+
+                  out += icon + " **" + label + "** " + category.title + " — " + (catScore ?? "?") + "/" + threshold + "\n\n";
+
+                  for (const a of failingAudits) {
+                    const val = a.displayValue ? " — " + a.displayValue : "";
+                    out += "- " + a.title + val + "\n";
+                  }
+
+                  out += "\n";
+                }
+
+                return out;
+              }
+
+              const desktopBreakdown = buildBreakdown(desktop, "desktop");
+              const mobileBreakdown = buildBreakdown(mobile, "mobile");
+
+              // Category Scores table
+              md += "<details>\n<summary>Category Scores</summary>\n\n";
+              md += "| Category | Mobile | Desktop | Target | |\n";
+              md += "|---|---:|---:|---|---:|\n";
+
+              for (const c of cats) {
+                const mS = mobile?.categories[c.key];
+                const dS = desktop?.categories[c.key];
+                const target = c.mT === c.dT
+                  ? ">" + c.mT
+                  : "M>" + c.mT + " / D>" + c.dT;
+                const mOk = mS == null || Math.round(mS * 100) >= c.mT;
+                const dOk = dS == null || Math.round(dS * 100) >= c.dT;
+                const icon = (mOk && dOk) ? "\u{1F7E2}" : "\u{1F534}";
+                md += "| " + c.label + " | " + fmtScore(mS) + " | " + fmtScore(dS) + " | " + target + " | " + icon + " |\n";
+              }
+
+              md += "\n</details>\n";
+
+              // Web Vitals table
+              md += "\n<details>\n<summary>Web Vitals & Metrics</summary>\n\n";
+              md += "| Metric | Mobile | Desktop | Budget | |\n";
+              md += "|---|---:|---:|---|---:|\n";
+
+              for (const v of vitals) {
+                const mV = mobile?.audits[v.key];
+                const dV = desktop?.audits[v.key];
+                let mFmt, dFmt, budgetFmt;
+
+                if (v.key === "cumulative-layout-shift") {
+                  mFmt = mV != null ? mV.toFixed(3) : "---";
+                  dFmt = dV != null ? dV.toFixed(3) : "---";
+                  budgetFmt = "<" + String(v.budget);
+                } else {
+                  mFmt = fmtMs(mV);
+                  dFmt = fmtMs(dV);
+                  budgetFmt = v.budget >= 1000
+                    ? "<" + String(v.budget / 1000) + "s"
+                    : "<" + String(v.budget) + "ms";
+                }
+
+                const mOk = mV == null || mV <= v.budget;
+                const dOk = dV == null || dV <= v.budget;
+                const icon = (mOk && dOk) ? "\u{1F7E2}" : "\u{1F534}";
+                md += "| " + v.label + " | " + mFmt + " | " + dFmt + " | " + budgetFmt + " | " + icon + " |\n";
+              }
+
+              md += "\n</details>\n";
+
+              // Issues Identified dropdown
+              if (desktopBreakdown || mobileBreakdown) {
+                md += "\n<details>\n<summary>Issues Identified</summary>\n\n";
+                md += desktopBreakdown;
+                md += mobileBreakdown;
+                md += "</details>\n";
+              }
+            }
+
+            const mobileArtifact = process.env.MOBILE_ARTIFACT_URL || "";
+            const desktopArtifact = process.env.DESKTOP_ARTIFACT_URL || "";
+            const links = [];
+            if (mobileArtifact) links.push("[Mobile](" + mobileArtifact + ")");
+            if (desktopArtifact) links.push("[Desktop](" + desktopArtifact + ")");
+            md += "\n---\n";
+            if (links.length) {
+              md += "**Full reports:** " + links.join(" · ") + "\n";
+            } else {
+              md += "**Full reports:** [workflow run](https://github.com/" + repo + "/actions/runs/" + runId + ")\n";
+            }
+
+            fs.mkdirSync(".lighthouseci", { recursive: true });
+            fs.writeFileSync(".lighthouseci/comment.md", md);
+            console.log(md);
+          } catch (e) {
+            console.error("Failed to build summary:", e);
+            const md = "<!-- lhci-report -->\n## Lighthouse Report\n\nFailed to generate summary. Check the workflow logs.\n";
+            fs.mkdirSync(".lighthouseci", { recursive: true });
+            fs.writeFileSync(".lighthouseci/comment.md", md);
+          }
+          '
+
+      - name: Find existing LHCI comment
+        id: find
+        if: ${{ !cancelled() }}
+        uses: peter-evans/find-comment@v3
+        with:
+          issue-number: ${{ steps.pr.outputs.number }}
+          body-includes: "<!-- lhci-report -->"
+
+      - name: Create or update PR comment
+        if: ${{ !cancelled() }}
+        uses: peter-evans/create-or-update-comment@v4
+        with:
+          issue-number: ${{ steps.pr.outputs.number }}
+          comment-id: ${{ steps.find.outputs.comment-id }}
+          edit-mode: replace
+          body-path: .lighthouseci/comment.md
+
+      - name: Fail if assertions failed
+        if: ${{ steps.lhci-mobile.outcome == 'failure' || steps.lhci-desktop.outcome == 'failure' }}
+        run: |
+          echo "Lighthouse assertions failed (mobile: ${{ steps.lhci-mobile.outcome }}, desktop: ${{ steps.lhci-desktop.outcome }})"
+          exit 1
