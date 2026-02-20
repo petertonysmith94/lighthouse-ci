@@ -2,15 +2,15 @@
  * Lighthouse CI config for Vercel Preview + Deployment Protection bypass.
  *
  * Usage (run twice):
- *   LHCI_PRESET=mobile  lhci autorun
- *   LHCI_PRESET=desktop lhci autorun
+ *   LH_PRESET=mobile  lhci autorun
+ *   LH_PRESET=desktop lhci autorun
  *
  * Workflow should set:
  *   - VERCEL_AUTOMATION_BYPASS_SECRET
  *   - LHCI_PREVIEW_URL (or pass urls via action input)
  */
 
-const preset = (process.env.LHCI_PRESET || "mobile").toLowerCase();
+const preset = (process.env.LH_PRESET || "mobile").toLowerCase();
 const isDesktop = preset === "desktop";
 
 // Targets from Plasma website spec:
@@ -31,7 +31,7 @@ module.exports = {
       numberOfRuns: 3,
 
       settings: {
-        preset: isDesktop ? "desktop" : "mobile",
+        ...(isDesktop ? { preset: "desktop" } : {}),
         formFactor: isDesktop ? "desktop" : "mobile",
 
         // More stable CI runs

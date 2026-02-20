@@ -152,7 +152,7 @@ jobs:
         uses: treosh/lighthouse-ci-action@v12
         env:
           VERCEL_AUTOMATION_BYPASS_SECRET: ${{ secrets.VERCEL_AUTOMATION_BYPASS_SECRET }}
-          LHCI_PRESET: mobile
+          LH_PRESET: mobile
         with:
           configPath: ./lighthouserc.js
           urls: |
@@ -166,7 +166,7 @@ jobs:
         uses: treosh/lighthouse-ci-action@v12
         env:
           VERCEL_AUTOMATION_BYPASS_SECRET: ${{ secrets.VERCEL_AUTOMATION_BYPASS_SECRET }}
-          LHCI_PRESET: desktop
+          LH_PRESET: desktop
         with:
           configPath: ./lighthouserc.js
           urls: |
