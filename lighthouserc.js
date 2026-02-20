@@ -14,7 +14,7 @@ ci: {
     upload: {
     // Write reports locally; we’ll upload as GH artifact
     target: "filesystem",
-    outputDir: "./lhci_reports",
+    outputDir: "./.lighthouseci",
     },
     assert: {
     assertions: {
