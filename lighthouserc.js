@@ -65,6 +65,10 @@ module.exports = {
           { minScore: isDesktop ? 0.95 : 0.9 },
         ],
         "categories:seo": ["error", { minScore: 0.95 }],
+        // Vercel preview deployments set X-Robots-Tag: noindex by design;
+        // production does not, so this audit is a false positive in CI.
+        "is-crawlable": "off",
+
         "categories:accessibility": ["warn", { minScore: 0.9 }],
         "categories:best-practices": ["warn", { minScore: 0.9 }],
 
