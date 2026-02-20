@@ -1,0 +1,219 @@
+name: Lighthouse CI (Vercel Preview)
+
+on:
+  pull_request:
+    types: [ready_for_review, synchronize]
+  issue_comment:
+    types: [created]
+
+jobs:
+  lhci:
+    runs-on: ubuntu-latest
+
+    # Only run on:
+    # - ready_for_review event (first time it’s set in-review)
+    # - synchronize events AFTER we’ve marked the PR as enabled (label)
+    # - issue_comment with "@lighthouse" on a PR
+    if: |
+      (github.event.action == ‘ready_for_review’) ||
+      (github.event.action == ‘synchronize’ && contains(github.event.pull_request.labels.*.name, ‘lhci-enabled’) && github.event.pull_request.draft == false) ||
+      (github.event_name == ‘issue_comment’ && github.event.issue.pull_request && contains(github.event.comment.body, ‘@lighthouse’))
+
+    permissions:
+      contents: read
+      pull-requests: write
+
+    steps:
+      # Resolve PR metadata when triggered via comment (issue_comment has no pull_request context)
+      - name: Resolve PR details from comment
+        id: pr
+        uses: actions/github-script@v7
+        with:
+          script: |
+            if (context.eventName === 'issue_comment') {
+              const { data: pr } = await github.rest.pulls.get({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                pull_number: context.issue.number,
+              });
+              core.setOutput('number', pr.number);
+              core.setOutput('sha', pr.head.sha);
+            } else {
+              core.setOutput('number', context.payload.pull_request.number);
+              core.setOutput('sha', context.payload.pull_request.head.sha);
+            }
+
+      - uses: actions/checkout@v5
+
+      - name: Enable LHCI for this PR (label once)
+        if: ${{ github.event.action == 'ready_for_review' }}
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const owner = context.repo.owner;
+            const repo = context.repo.repo;
+            const issue_number = ${{ steps.pr.outputs.number }};
+            const label = 'lhci-enabled';
+
+            // Ensure label exists (create if missing)
+            try {
+              await github.rest.issues.getLabel({ owner, repo, name: label });
+            } catch (e) {
+              await github.rest.issues.createLabel({
+                owner, repo, name: label,
+                color: '0E8A16',
+                description: 'Run Lighthouse CI on PR updates after ready-for-review'
+              });
+            }
+
+            // Add label to PR
+            await github.rest.issues.addLabels({
+              owner, repo, issue_number,
+              labels: [label],
+            });
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: "latest"
+
+      # Wait for the *latest* Vercel preview deployment for this commit SHA to be READY,
+      # then output the preview URL.
+      - name: Wait for Vercel preview deployment to be ready
+        id: vercel
+        env:
+          VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
+          VERCEL_TEAM_ID: ${{ secrets.VERCEL_TEAM_ID }} # optional if you’re not in a team
+          VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}
+          COMMIT_SHA: ${{ steps.pr.outputs.sha }}
+        run: |
+          bun -e '
+          const token = process.env.VERCEL_TOKEN;
+          const teamId = process.env.VERCEL_TEAM_ID;
+          const projectId = process.env.VERCEL_PROJECT_ID;
+          const sha = process.env.COMMIT_SHA;
+
+          if (!token || !projectId || !sha) {
+            console.error("Missing VERCEL_TOKEN / VERCEL_PROJECT_ID / COMMIT_SHA");
+            process.exit(1);
+          }
+
+          const base = "https://api.vercel.com/v6/deployments";
+          // Filtering by meta-githubCommitSha is commonly used with Git integration.
+          // (It’s documented in Vercel CLI docs; REST filtering by meta is used in practice.)
+          const url = new URL(base);
+          url.searchParams.set("app", projectId);
+          if (teamId) url.searchParams.set("teamId", teamId);
+          url.searchParams.set("meta-githubCommitSha", sha);
+
+          const headers = { Authorization: `Bearer ${token}` };
+
+          const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+
+          const maxMs = 10 * 60 * 1000; // 10 min
+          const start = Date.now();
+
+          while (Date.now() - start < maxMs) {
+            const res = await fetch(url, { headers });
+            if (!res.ok) {
+              console.error("Vercel API error", res.status, await res.text());
+              process.exit(1);
+            }
+            const data = await res.json();
+            const deployments = data.deployments || [];
+            const d = deployments[0]; // newest
+
+            if (d) {
+              const state = d.state;
+              const previewUrl = d.url ? `https://${d.url}` : null;
+
+              // State values vary; READY is the key stable target. If URL is still null, it’s not done.
+              if ((state === "READY" || state === "ready") && previewUrl) {
+                console.log("Preview ready:", previewUrl);
+                const out = process.env.GITHUB_OUTPUT;
+                await Bun.write(out, `preview_url=${previewUrl}\n`, { append: true });
+                process.exit(0);
+              } else {
+                console.log("Not ready yet:", { state, url: d.url ?? null });
+              }
+            } else {
+              console.log("No deployment found yet for sha", sha);
+            }
+
+            await sleep(5000);
+          }
+
+          console.error("Timed out waiting for Vercel preview deployment");
+          process.exit(1);
+          '
+
+      - name: Run Lighthouse CI
+        uses: treosh/lighthouse-ci-action@v12
+        env:
+          VERCEL_AUTOMATION_BYPASS_SECRET: ${{ secrets.VERCEL_AUTOMATION_BYPASS_SECRET }}
+        with:
+          configPath: ./lighthouserc.js
+          urls: |
+            ${{ steps.vercel.outputs.preview_url }}
+          uploadArtifacts: false
+          temporaryPublicStorage: false
+
+      - name: Upload Lighthouse report artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: lhci-report
+          path: lhci_reports/**
+
+      - name: Summarize scores for PR comment
+        id: summary
+        run: |
+          bun -e '
+          const fs = require("fs");
+          const manifestPath = "lhci_reports/manifest.json";
+          const m = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
+          const first = m[0];
+          const s = first.summary || {};
+          const pct = (x) => (x == null ? "n/a" : String(Math.round(x * 100)));
+
+          const outputs = [
+            ["url", first.url || ""],
+            ["perf", pct(s.performance)],
+            ["a11y", pct(s.accessibility)],
+            ["bp", pct(s["best-practices"])],
+            ["seo", pct(s.seo)],
+          ];
+
+          const outFile = process.env.GITHUB_OUTPUT;
+          for (const [k,v] of outputs) {
+            fs.appendFileSync(outFile, `${k}=${v}\n`);
+          }
+          '
+
+      - name: Find existing LHCI comment
+        id: find
+        uses: peter-evans/find-comment@v3
+        with:
+          issue-number: ${{ steps.pr.outputs.number }}
+          body-includes: "<!-- lhci-report -->"
+
+      - name: Create or update PR comment
+        uses: peter-evans/create-or-update-comment@v4
+        with:
+          issue-number: ${{ steps.pr.outputs.number }}
+          comment-id: ${{ steps.find.outputs.comment-id }}
+          edit-mode: replace
+          body: |
+            <!-- lhci-report -->
+            ## Lighthouse report
+
+            **Preview:** ${{ steps.vercel.outputs.preview_url }}
+
+            | Category | Score |
+            |---|---:|
+            | Performance | ${{ steps.summary.outputs.perf }} |
+            | Accessibility | ${{ steps.summary.outputs.a11y }} |
+            | Best Practices | ${{ steps.summary.outputs.bp }} |
+            | SEO | ${{ steps.summary.outputs.seo }} |
+
+            **Full HTML report:** open this workflow run → **Artifacts** → `lhci-report`  
+            Run: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
