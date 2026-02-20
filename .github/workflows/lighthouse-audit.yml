@@ -174,12 +174,20 @@ jobs:
           uploadArtifacts: false
           temporaryPublicStorage: false
 
-      - name: Upload Lighthouse reports
+      - name: Upload Lighthouse reports (mobile)
         if: ${{ !cancelled() }}
         uses: actions/upload-artifact@v4
         with:
-          name: lhci-report
-          path: .lighthouseci/**
+          name: mobile-lhci-report
+          path: .lighthouseci/mobile/**
+          include-hidden-files: true
+
+      - name: Upload Lighthouse reports (desktop)
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: desktop-lhci-report
+          path: .lighthouseci/desktop/**
           include-hidden-files: true
 
       - name: Build PR comment
@@ -256,17 +264,39 @@ jobs:
 
             let md = "<!-- lhci-report -->\n";
             md += "## Lighthouse Report\n\n";
-            md += "**Preview:** " + previewUrl + "\n\n";
 
             if (!mobile && !desktop) {
               md += "No Lighthouse results available. Check the workflow logs for errors.\n";
             } else {
+              // Compute overall pass/fail per preset
+              function isPresetPassing(results, preset) {
+                if (!results) return null;
+                for (const c of cats) {
+                  const s = results.categories[c.key];
+                  const threshold = preset === "mobile" ? c.mT : c.dT;
+                  if (s != null && Math.round(s * 100) < threshold) return false;
+                }
+                for (const v of vitals) {
+                  const val = results.audits[v.key];
+                  if (val != null && val > v.budget) return false;
+                }
+                return true;
+              }
+
+              const desktopPass = isPresetPassing(desktop, "desktop");
+              const mobilePass = isPresetPassing(mobile, "mobile");
+
+              const desktopIcon = desktopPass === null ? "\u26AA" : desktopPass ? "\u{1F7E2}" : "\u{1F534}";
+              const mobileIcon = mobilePass === null ? "\u26AA" : mobilePass ? "\u{1F7E2}" : "\u{1F534}";
+
+              md += desktopIcon + " **Desktop** &nbsp;&nbsp; " + mobileIcon + " **Mobile**\n\n";
+              md += "**Preview:** " + previewUrl + "\n\n";
+
               // Category Scores table
-              md += "### Category Scores\n\n";
+              md += "<details>\n<summary>Category Scores</summary>\n\n";
               md += "| Category | Mobile | Desktop | Target | |\n";
               md += "|---|---:|---:|---|---:|\n";
 
-              let hasFailedCategory = false;
               for (const c of cats) {
                 const mS = mobile?.categories[c.key];
                 const dS = desktop?.categories[c.key];
@@ -275,17 +305,17 @@ jobs:
                   : "M>" + c.mT + " / D>" + c.dT;
                 const mOk = mS == null || Math.round(mS * 100) >= c.mT;
                 const dOk = dS == null || Math.round(dS * 100) >= c.dT;
-                if (!mOk || !dOk) hasFailedCategory = true;
                 const icon = (mOk && dOk) ? "\u{1F7E2}" : "\u{1F534}";
                 md += "| " + c.label + " | " + fmtScore(mS) + " | " + fmtScore(dS) + " | " + target + " | " + icon + " |\n";
               }
 
+              md += "\n</details>\n";
+
               // Web Vitals table
-              md += "\n### Web Vitals & Metrics\n\n";
+              md += "\n<details>\n<summary>Web Vitals & Metrics</summary>\n\n";
               md += "| Metric | Mobile | Desktop | Budget | |\n";
               md += "|---|---:|---:|---|---:|\n";
 
-              let hasFailedVital = false;
               for (const v of vitals) {
                 const mV = mobile?.audits[v.key];
                 const dV = desktop?.audits[v.key];
@@ -305,10 +335,11 @@ jobs:
 
                 const mOk = mV == null || mV <= v.budget;
                 const dOk = dV == null || dV <= v.budget;
-                if (!mOk || !dOk) hasFailedVital = true;
                 const icon = (mOk && dOk) ? "\u{1F7E2}" : "\u{1F534}";
                 md += "| " + v.label + " | " + mFmt + " | " + dFmt + " | " + budgetFmt + " | " + icon + " |\n";
               }
+
+              md += "\n</details>\n";
             }
 
             md += "\n---\n";
