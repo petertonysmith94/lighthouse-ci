@@ -189,6 +189,7 @@ jobs:
           rm -f .lighthouseci/*.json .lighthouseci/*.html
 
       - name: Upload Lighthouse reports (mobile)
+        id: upload-mobile
         if: ${{ !cancelled() }}
         uses: actions/upload-artifact@v4
         with:
@@ -197,6 +198,7 @@ jobs:
           include-hidden-files: true
 
       - name: Upload Lighthouse reports (desktop)
+        id: upload-desktop
         if: ${{ !cancelled() }}
         uses: actions/upload-artifact@v4
         with:
@@ -207,6 +209,9 @@ jobs:
       - name: Build PR comment
         id: summary
         if: ${{ !cancelled() }}
+        env:
+          MOBILE_ARTIFACT_URL: ${{ steps.upload-mobile.outputs.artifact-url }}
+          DESKTOP_ARTIFACT_URL: ${{ steps.upload-desktop.outputs.artifact-url }}
         run: |
           bun -e '
           const fs = require("fs");
@@ -358,12 +363,6 @@ jobs:
               const desktopBreakdown = buildBreakdown(desktop, "desktop");
               const mobileBreakdown = buildBreakdown(mobile, "mobile");
 
-              if (desktopBreakdown || mobileBreakdown) {
-                md += "### Issues Identified\n\n";
-                md += desktopBreakdown;
-                md += mobileBreakdown;
-              }
-
               // Category Scores table
               md += "<details>\n<summary>Category Scores</summary>\n\n";
               md += "| Category | Mobile | Desktop | Target | |\n";
@@ -412,10 +411,27 @@ jobs:
               }
 
               md += "\n</details>\n";
+
+              // Issues Identified dropdown
+              if (desktopBreakdown || mobileBreakdown) {
+                md += "\n<details>\n<summary>Issues Identified</summary>\n\n";
+                md += desktopBreakdown;
+                md += mobileBreakdown;
+                md += "</details>\n";
+              }
             }
 
+            const mobileArtifact = process.env.MOBILE_ARTIFACT_URL || "";
+            const desktopArtifact = process.env.DESKTOP_ARTIFACT_URL || "";
+            const links = [];
+            if (mobileArtifact) links.push("[Mobile](" + mobileArtifact + ")");
+            if (desktopArtifact) links.push("[Desktop](" + desktopArtifact + ")");
             md += "\n---\n";
-            md += "**Full reports:** [workflow run](https://github.com/" + repo + "/actions/runs/" + runId + ") > Artifacts > `lhci-report`\n";
+            if (links.length) {
+              md += "**Full reports:** " + links.join(" · ") + "\n";
+            } else {
+              md += "**Full reports:** [workflow run](https://github.com/" + repo + "/actions/runs/" + runId + ")\n";
+            }
 
             fs.mkdirSync(".lighthouseci", { recursive: true });
             fs.writeFileSync(".lighthouseci/comment.md", md);
